@@ -114,7 +114,7 @@ attempt(Functor&& fn, Args&&... args)
     using PromiseType = typename FunctorType::PromiseType;
     using ValueType = typename PromiseType::Type;
 
-    // NOTE: std::forward<T<U>>: MSVC 2013 fails when forwarding
+    // NOTE(yuraolex): std::forward<T<U>>: MSVC 2013 fails when forwarding
     // template type (error: "expects 4 arguments - 0 provided").
     // However it succeeds with type alias.
     // TODO: should we expose QPromise::ResolveType & RejectType?

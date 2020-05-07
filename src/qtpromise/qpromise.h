@@ -59,13 +59,24 @@ public:
     bool isRejected() const { return m_d->isRejected(); }
     bool isPending() const { return m_d->isPending(); }
 
+
     template<typename TFulfilled, typename TRejected>
     inline typename QtPromisePrivate::PromiseHandler<T, TFulfilled>::Promise
     then(const TFulfilled& fulfilled, const TRejected& rejected) const;
 
+    // NOTE(yuraolex): I have added context to the end because I had troubles with overloads,
+    // generally I think that's not an issue and can be fixed but I was short on time
+    template<typename TFulfilled, typename TRejected>
+    inline typename QtPromisePrivate::PromiseHandler<T, TFulfilled>::Promise
+    then(const TFulfilled& fulfilled, const TRejected& rejected, QObject *context) const;
+
     template<typename TFulfilled>
     inline typename QtPromisePrivate::PromiseHandler<T, TFulfilled>::Promise
     then(TFulfilled&& fulfilled) const;
+
+    template<typename TFulfilled>
+    inline typename QtPromisePrivate::PromiseHandler<T, TFulfilled>::Promise
+    then(TFulfilled&& fulfilled, QObject *context) const;
 
     template<typename TRejected>
     inline typename QtPromisePrivate::PromiseHandler<T, std::nullptr_t>::Promise

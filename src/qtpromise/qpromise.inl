@@ -52,13 +52,21 @@ template<typename TFulfilled, typename TRejected>
 inline typename QtPromisePrivate::PromiseHandler<T, TFulfilled>::Promise
 QPromiseBase<T>::then(const TFulfilled& fulfilled, const TRejected& rejected) const
 {
+    return then(fulfilled, rejected, nullptr);
+}
+
+template<typename T>
+template<typename TFulfilled, typename TRejected>
+inline typename QtPromisePrivate::PromiseHandler<T, TFulfilled>::Promise
+QPromiseBase<T>::then(const TFulfilled& fulfilled, const TRejected& rejected, QObject *context) const
+{
     using namespace QtPromisePrivate;
     using PromiseType = typename PromiseHandler<T, TFulfilled>::Promise;
 
     PromiseType next([&](const QPromiseResolve<typename PromiseType::Type>& resolve,
                          const QPromiseReject<typename PromiseType::Type>& reject) {
-        m_d->addHandler(PromiseHandler<T, TFulfilled>::create(fulfilled, resolve, reject));
-        m_d->addCatcher(PromiseCatcher<T, TRejected>::create(rejected, resolve, reject));
+        m_d->addHandler(context, PromiseHandler<T, TFulfilled>::create(fulfilled, resolve, reject));
+        m_d->addCatcher(context, PromiseCatcher<T, TRejected>::create(rejected, resolve, reject));
     });
 
     if (!m_d->isPending()) {
@@ -73,7 +81,15 @@ template<typename TFulfilled>
 inline typename QtPromisePrivate::PromiseHandler<T, TFulfilled>::Promise
 QPromiseBase<T>::then(TFulfilled&& fulfilled) const
 {
-    return then(std::forward<TFulfilled>(fulfilled), nullptr);
+    return then(std::forward<TFulfilled>(fulfilled), nullptr, nullptr);
+}
+
+template<typename T>
+template<typename TFulfilled>
+inline typename QtPromisePrivate::PromiseHandler<T, TFulfilled>::Promise
+QPromiseBase<T>::then(TFulfilled&& fulfilled, QObject *context) const
+{
+    return then(std::forward<TFulfilled>(fulfilled), nullptr, context);
 }
 
 template<typename T>

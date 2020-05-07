@@ -46,17 +46,7 @@ using invoke_result = std::result_of<F(ArgTypes...)>;
 template<typename F>
 static void qtpromise_defer(F&& f, const QPointer<QThread>& thread)
 {
-    using FType = typename std::decay<F>::type;
-
-    struct Event : public QEvent
-    {
-        Event(FType&& f) : QEvent{QEvent::None}, m_f{std::move(f)} { }
-        Event(const FType& f) : QEvent{QEvent::None}, m_f{f} { }
-        ~Event() { m_f(); }
-        FType m_f;
-    };
-
-    if (!thread || thread->isFinished()) {
+    if (!thread || thread->isFinished() || !thread->isRunning()) {
         // Make sure to not call `f` if the captured thread doesn't exist anymore,
         // which would potentially result in dispatching to the wrong thread (ie.
         // nullptr == current thread). Since the target thread is gone, it should
@@ -65,7 +55,9 @@ static void qtpromise_defer(F&& f, const QPointer<QThread>& thread)
     }
 
     QObject* target = QAbstractEventDispatcher::instance(thread);
-    if (!target && QCoreApplication::closingDown()) {
+    // NOTE(yuraolex): if no target it means that thread is stopped or not started.
+    // This situation is possible.
+    if (!target) {
         // When the app is shutting down, the even loop is not anymore available
         // so we don't have any way to dispatch `f`. This case can happen when a
         // promise is resolved after the app is requested to close, in which case
@@ -74,7 +66,7 @@ static void qtpromise_defer(F&& f, const QPointer<QThread>& thread)
     }
 
     Q_ASSERT_X(target, "postMetaCall", "Target thread must have an event loop");
-    QCoreApplication::postEvent(target, new Event{std::forward<F>(f)});
+    QMetaObject::invokeMethod(target, std::forward<F>(f));
 }
 
 template<typename F>
@@ -173,12 +165,12 @@ struct PromiseFulfill<QtPromise::QPromise<T>>
             reject(promise.m_d->error());
         } else {
             promise.then(
-                [=]() {
-                    resolve(promise.m_d->value());
-                },
-                [=]() { // catch all
-                    reject(promise.m_d->error());
-                });
+                        [=]() {
+                resolve(promise.m_d->value());
+            },
+            [=]() { // catch all
+                reject(promise.m_d->error());
+            });
         }
     }
 };
@@ -195,12 +187,12 @@ struct PromiseFulfill<QtPromise::QPromise<void>>
             reject(promise.m_d->error());
         } else {
             promise.then(
-                [=]() {
-                    resolve();
-                },
-                [=]() { // catch all
-                    reject(promise.m_d->error());
-                });
+                        [=]() {
+                resolve();
+            },
+            [=]() { // catch all
+                reject(promise.m_d->error());
+            });
         }
     }
 };
@@ -387,12 +379,17 @@ struct PromiseMapper<Sequence<T, Args...>, F>
 template<typename T>
 class PromiseData;
 
+// NOTE(yuraolex): I have introduced dispatch type which migth be even unneeded,
+// just a quick way to tell where we need to dispatch callback
+enum class DispatchType { Context, Global };
+
 template<typename T, typename F>
 class PromiseDataBase : public QSharedData
 {
 public:
-    using Handler = std::pair<QPointer<QThread>, std::function<F>>;
-    using Catcher = std::pair<QPointer<QThread>, std::function<void(const PromiseError&)>>;
+
+    using Handler = std::tuple<QPointer<QObject>, QPointer<QThread>, std::function<F>, DispatchType>;
+    using Catcher = std::tuple<QPointer<QObject>, QPointer<QThread>, std::function<void(const PromiseError&)>, DispatchType>;
 
     virtual ~PromiseDataBase() { }
 
@@ -405,16 +402,22 @@ public:
         return !m_settled;
     }
 
-    void addHandler(std::function<F> handler)
+    void addHandler(QPointer<QObject> context, std::function<F> handler)
     {
         QWriteLocker lock{&m_lock};
-        m_handlers.append({QThread::currentThread(), std::move(handler)});
+        m_handlers.append({context,
+                           context ? context->thread() : QThread::currentThread(),
+                           std::move(handler),
+                           context ? DispatchType::Context : DispatchType::Global});
     }
 
-    void addCatcher(std::function<void(const PromiseError&)> catcher)
+    void addCatcher(QPointer<QObject> context, std::function<void(const PromiseError&)> catcher)
     {
         QWriteLocker lock{&m_lock};
-        m_catchers.append({QThread::currentThread(), std::move(catcher)});
+        m_catchers.append({context,
+                           context ? context->thread() : QThread::currentThread(),
+                           std::move(catcher),
+                           context ? DispatchType::Context : DispatchType::Global});
     }
 
     template<typename E>
@@ -459,12 +462,26 @@ public:
         Q_ASSERT(!error.isNull());
 
         for (const auto& catcher : catchers) {
-            const auto& fn = catcher.second;
-            qtpromise_defer(
-                [=]() {
+            auto context = std::get<0>(catcher);
+            auto targetThread = std::get<1>(catcher);
+            const auto& fn = std::get<2>(catcher);
+            auto dispatchType = std::get<3>(catcher);
+            // NOTE(yuraolex): I didn't handle cases when context is destroyed
+            // but it should be pretty straightforward
+            // I haven't used QMetaObject::invokeMethod(context, fn) because there might be a situation when context is still alive in this thread
+            // but it will be deleted before dispatching QMetaObject::invokeMethod and we won't be able to deliver error.
+            qtpromise_defer([=]() {
+                if(dispatchType == DispatchType::Context && context)
+                {
+                    Q_ASSERT(context->thread() == QThread::currentThread());
                     fn(error);
-                },
-                catcher.first);
+                }
+                else
+                {
+                    fn(error);
+                }
+            },
+            targetThread);
         }
     }
 
@@ -492,7 +509,7 @@ class PromiseData : public PromiseDataBase<T, void(const T&)>
 {
     using Handler = typename PromiseDataBase<T, void(const T&)>::Handler;
 
-public:
+    public:
     template<typename V>
     void resolve(V&& value)
     {
@@ -514,16 +531,26 @@ public:
         Q_ASSERT(!value.isNull());
 
         for (const auto& handler : handlers) {
-            const auto& fn = handler.second;
-            qtpromise_defer(
-                [=]() {
+            auto context = std::get<0>(handler);
+            auto targetThread = std::get<1>(handler);
+            const auto& fn = std::get<2>(handler);
+            auto dispatchType = std::get<3>(handler);
+            qtpromise_defer([=]() {
+                if(dispatchType == DispatchType::Context && context)
+                {
+                    Q_ASSERT(context->thread() == QThread::currentThread());
                     fn(value.data());
-                },
-                handler.first);
+                }
+                else
+                {
+                    fn(value.data());
+                }
+            },
+            targetThread);
         }
     }
 
-private:
+    private:
     PromiseValue<T> m_value;
 };
 
@@ -532,14 +559,29 @@ class PromiseData<void> : public PromiseDataBase<void, void()>
 {
     using Handler = PromiseDataBase<void, void()>::Handler;
 
-public:
+    public:
     void resolve() { setSettled(); }
 
-protected:
+    protected:
     void notify(const QVector<Handler>& handlers) Q_DECL_OVERRIDE
     {
         for (const auto& handler : handlers) {
-            qtpromise_defer(handler.second, handler.first);
+            auto context = std::get<0>(handler);
+            auto targetThread = std::get<1>(handler);
+            const auto& fn = std::get<2>(handler);
+            auto dispatchType = std::get<3>(handler);
+            qtpromise_defer([=]() {
+                if(dispatchType == DispatchType::Context && context)
+                {
+                    Q_ASSERT(context->thread() == QThread::currentThread());
+                    fn();
+                }
+                else
+                {
+                    fn();
+                }
+            },
+            targetThread);
         }
     }
 };

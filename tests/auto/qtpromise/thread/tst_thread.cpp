@@ -16,6 +16,7 @@ class tst_thread : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void thenContext();
     void resolve();
     void resolve_void();
     void reject();
@@ -205,4 +206,24 @@ void tst_thread::finally()
     QVERIFY(source != target);
     QCOMPARE(source, QThread::currentThread());
     QCOMPARE(value, 43);
+}
+
+void tst_thread::thenContext()
+{
+    QThread worker;
+    QObject context;
+    context.moveToThread(&worker);
+    QSignalSpy workerStarted(&worker, &QThread::started);
+    worker.start();
+    workerStarted.count() > 0 || workerStarted.wait(); // wait for thread to be actually start
+
+    QThread *target = nullptr;
+    QtPromise::resolve().then([&] {
+        target = QThread::currentThread();
+    }, nullptr, &context).wait();
+
+    QVERIFY(target != nullptr);
+    QVERIFY(target == &worker);
+    worker.quit();
+    worker.wait();
 }
